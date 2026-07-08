@@ -2,8 +2,11 @@ import React, { useState } from 'react';
 import './App.css';
 import { ThreeVisualizer } from './components/ThreeVisualizer';
 import { AssemblyGuide } from './components/AssemblyGuide';
+import { Dashboard } from './components/Dashboard';
 
 function App() {
+  const [activeTab, setActiveTab] = useState<'generator' | 'dashboard'>('generator');
+  
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<any>(null);
@@ -43,43 +46,66 @@ function App() {
         <p style={{ textAlign: 'center', opacity: 0.8 }}>
           Turn any image into an Assembly-Optimized 3D Perler Bead Model
         </p>
+        
+        <div className="tabs">
+          <button 
+            className={`tab-btn ${activeTab === 'generator' ? 'active' : ''}`}
+            onClick={() => setActiveTab('generator')}
+          >
+            Generator
+          </button>
+          <button 
+            className={`tab-btn ${activeTab === 'dashboard' ? 'active' : ''}`}
+            onClick={() => setActiveTab('dashboard')}
+          >
+            Metrics Dashboard
+          </button>
+        </div>
       </header>
 
-      {!result ? (
-        <div className="glass-panel">
-          <div 
-            className="dropzone" 
-            onDragOver={(e) => e.preventDefault()} 
-            onDrop={handleDrop}
-          >
-            {file ? (
-              <div>
-                <h3>{file.name}</h3>
-                <button className="btn" onClick={handleProcess} style={{ marginTop: '1rem' }}>
-                  {loading ? 'Processing...' : 'Generate 3D Model'}
-                </button>
-              </div>
-            ) : (
-              <h3>Drag & Drop an image here</h3>
-            )}
-          </div>
-        </div>
+      {activeTab === 'dashboard' ? (
+        <Dashboard />
       ) : (
-        <div className="viewer-grid">
+        !result ? (
           <div className="glass-panel">
-            <h2>3D Preview</h2>
-            <div style={{ height: '400px', background: 'rgba(0,0,0,0.5)', borderRadius: '8px', overflow: 'hidden' }}>
-              <ThreeVisualizer voxelShape={result.voxel_shape} />
+            <div 
+              className="dropzone" 
+              onDragOver={(e) => e.preventDefault()} 
+              onDrop={handleDrop}
+            >
+              {file ? (
+                <div>
+                  <h3>{file.name}</h3>
+                  <button className="btn" onClick={handleProcess} style={{ marginTop: '1rem' }}>
+                    {loading ? 'Processing...' : 'Generate 3D Model'}
+                  </button>
+                </div>
+              ) : (
+                <h3>Drag & Drop an image here</h3>
+              )}
             </div>
           </div>
-          <div className="glass-panel">
-            <h2>Assembly Guide</h2>
-            <AssemblyGuide instructions={result.instructions} />
-            <button className="btn" onClick={() => setResult(null)} style={{ marginTop: '2rem', width: '100%' }}>
-              Start Over With New Image
-            </button>
+        ) : (
+          <div className="viewer-grid">
+            <div className="glass-panel">
+              <h2>3D Preview</h2>
+              <div style={{ height: '400px', background: 'rgba(0,0,0,0.5)', borderRadius: '8px', overflow: 'hidden' }}>
+                <ThreeVisualizer 
+                  voxelShape={result.voxel_shape} 
+                  voxelMatrix={result.voxel_matrix} 
+                  colorMatrix={result.color_matrix} 
+                />
+              </div>
+            </div>
+            <div className="glass-panel">
+              <h2>Assembly Guide</h2>
+              <AssemblyGuide instructions={result.instructions} />
+              <button className="btn" onClick={() => setResult(null)} style={{ marginTop: '2rem', width: '100%' }}>
+                Start Over With New Image
+              </button>
+            </div>
           </div>
-        </div>
+        )
       )}
     </div>
   );

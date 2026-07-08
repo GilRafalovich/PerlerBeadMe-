@@ -90,7 +90,7 @@ h1 {
 
 .viewer-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 2rem;
   width: 100%;
 }
@@ -104,4 +104,32 @@ h1 {
     opacity: 1;
     transform: translateY(0);
   }
+}
+
+.tabs {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+
+.tab-btn {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: white;
+  padding: 0.5rem 1.5rem;
+  border-radius: 20px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.tab-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.tab-btn.active {
+  background: linear-gradient(135deg, #FF6B6B 0%, #4ECDC4 100%);
+  border-color: transparent;
+  box-shadow: 0 4px 15px rgba(255, 107, 107, 0.3);
 }

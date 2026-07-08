@@ -26,39 +26,24 @@ class HybridAssembler:
 
     def decompose(self):
         """
-        Performs the adaptive plane generation and hybrid interlock calculation.
+        Performs the adaptive plane generation for kid-friendly assembly.
+        Forces Z-axis (Pancake Slicing) since the Z-dimension is strictly constrained to 4 layers.
         """
-        dominant_axis = self.calculate_skeleton()
         residual = np.copy(self.voxel_matrix)
         instructions = []
         
-        # Greedy Plane Extraction
-        # If Z is the dominant axis (tall object), we use pancake layers with dowels.
-        # If X/Y is dominant (wide/long object), we use slotted puzzle planes for integrity.
-        
-        if dominant_axis == 2:
-            print("Detected Z-Axis dominance. Using Pancake Slicing with Dowel Locks...")
-            for z in range(self.dim_z):
-                layer = residual[:, :, z]
-                if np.sum(layer) > 0:
-                    dowel_holes = self._generate_dowel_holes(layer)
-                    instructions.append({
-                        "type": "horizontal_plane",
-                        "z_index": z,
-                        "layout": layer.tolist(),
-                        "dowel_holes": dowel_holes
-                    })
-        else:
-            print("Detected X/Y-Axis dominance. Using Slotted Puzzle Planes...")
-            # Decompose into vertical planes for structural strength
-            for x in range(self.dim_x):
-                layer = residual[x, :, :]
-                if np.sum(layer) > 0:
-                    instructions.append({
-                        "type": "vertical_plane",
-                        "x_index": x,
-                        "layout": layer.tolist()
-                    })
+        print(f"Generating Kid-Friendly Assembly: Slicing into {self.dim_z} horizontal layers...")
+        for z in range(self.dim_z):
+            layer = residual[:, :, z]
+            if np.sum(layer) > 0:
+                # Merge small parts if necessary to stay under 10 detailed parts total
+                # For now, each layer acts as a single primary part template
+                instructions.append({
+                    "type": "horizontal_plane",
+                    "z_index": z,
+                    "layout": layer.tolist(),
+                    "dowel_holes": []
+                })
                     
         return instructions
         
