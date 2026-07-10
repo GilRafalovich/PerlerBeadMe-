@@ -14,6 +14,35 @@ from voxelizer import VertexAI3DEstimator
 
 import kagglehub
 
+def generate_ground_truth_voxel_matrix(obj_path, max_dim=60):
+    try:
+        mesh = trimesh.load(obj_path, force='mesh')
+        max_extent = np.max(mesh.extents)
+        if max_extent == 0: return None
+        voxel_grid = mesh.voxelized(pitch=max_extent/max_dim).fill()
+        m = voxel_grid.matrix
+        padded = np.zeros((max_dim, max_dim, max_dim), dtype=bool)
+        x, y, z = min(max_dim, m.shape[0]), min(max_dim, m.shape[1]), min(max_dim, m.shape[2])
+        padded[:x, :y, :z] = m[:x, :y, :z]
+        return padded
+    except Exception as e:
+        return None
+
+def calculate_iou(mat1, mat2):
+    intersection = np.logical_and(mat1, mat2).sum()
+    union = np.logical_or(mat1, mat2).sum()
+    return intersection / union if union > 0 else 0
+
+def calculate_chamfer_distance(mat1, mat2):
+    pts1 = np.argwhere(mat1)
+    pts2 = np.argwhere(mat2)
+    if len(pts1) == 0 or len(pts2) == 0: return 999.0
+    tree1 = cKDTree(pts1)
+    tree2 = cKDTree(pts2)
+    d1, _ = tree1.query(pts2)
+    d2, _ = tree2.query(pts1)
+    return np.mean(d1) + np.mean(d2)
+
 def run_verification(limit=100):
     print("--- Pix3D End-to-End Verification Pipeline ---")
     print("Downloading Pix3D via KaggleHub (This might take a minute)...")
@@ -47,7 +76,7 @@ def run_verification(limit=100):
     else:
         print(f"Running full dataset evaluation on {len(data)} samples!")
         
-    quantizer = VoxelQuantizer(max_dim_xy=60, max_dim_z=4)
+    quantizer = VoxelQuantizer(max_dim_xy=60)
     ai_estimator = VertexAI3DEstimator()
     
     ious = []
@@ -104,6 +133,8 @@ def run_verification(limit=100):
         print(f"Average Chamfer Distance: {avg_cd:.4f} (Lower is better for structural match)")
         
         # Save to JSON
+        os.makedirs("test_results", exist_ok=True)
+        out_path = os.path.join("test_results", "verification_results.json")
         output_data = {
             "summary": {
                 "total_evaluated": len(ious),
@@ -112,9 +143,9 @@ def run_verification(limit=100):
             },
             "runs": results
         }
-        with open("verification_results.json", "w") as f:
+        with open(out_path, "w") as f:
             json.dump(output_data, f, indent=4)
-        print("Results saved to verification_results.json")
+        print(f"Results saved to {out_path}")
     else:
         print("No models were successfully evaluated.")
 

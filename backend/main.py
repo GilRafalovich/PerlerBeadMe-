@@ -24,7 +24,7 @@ app.add_middleware(
 
 print("Initializing AI Pipeline...")
 depth_estimator = VertexAI3DEstimator()
-voxel_quantizer = VoxelQuantizer(max_dim_xy=60, max_dim_z=4)
+voxel_quantizer = VoxelQuantizer(max_dim_xy=60)
 color_quantizer = ColorQuantizer()
 print("Pipeline Ready.")
 
@@ -77,9 +77,12 @@ async def process_image(file: UploadFile = File(...)):
 @app.get("/api/metrics")
 async def get_metrics():
     """Returns the verification metrics JSON."""
-    results_path = "verification_results.json"
+    results_path = os.path.join("test_results", "verification_results.json")
     if not os.path.exists(results_path):
-        return {"status": "error", "message": "No verification results found. Please run a batch evaluation first."}
+        # Fallback to root for backwards compatibility if needed
+        results_path = "verification_results.json"
+        if not os.path.exists(results_path):
+            return {"status": "error", "message": "No verification results found. Please run a batch evaluation first."}
     with open(results_path, "r") as f:
         return json.load(f)
 

@@ -54,6 +54,9 @@ export const ThreeVisualizer: React.FC<ThreeVisualizerProps> = ({ voxelShape, vo
     }
   }, [instances]);
 
+  const geometry = useMemo(() => new THREE.BoxGeometry(0.9, 0.9, 0.9), []);
+  const material = useMemo(() => new THREE.MeshStandardMaterial({ roughness: 0.3, metalness: 0.1 }), []);
+
   return (
     <Canvas camera={{ position: [center.x * 2, center.y * 2.5, center.z * 2.5], fov: 50 }}>
       <ambientLight intensity={0.8} />
@@ -63,11 +66,7 @@ export const ThreeVisualizer: React.FC<ThreeVisualizerProps> = ({ voxelShape, vo
       <OrbitControls target={center} makeDefault />
       
       {instances.length > 0 ? (
-        <instancedMesh ref={meshRef} args={[null, null, instances.length]}>
-          {/* Using 0.9 scale creates a nice "bead" separation effect */}
-          <boxGeometry args={[0.9, 0.9, 0.9]} />
-          <meshStandardMaterial roughness={0.3} metalness={0.1} />
-        </instancedMesh>
+        <instancedMesh ref={meshRef} args={[geometry, material, instances.length]} />
       ) : (
         <mesh position={center}>
           <boxGeometry args={voxelShape || [20, 20, 20]} />
