@@ -7,7 +7,7 @@ import cv2
 import json
 
 # Import our modular pipeline
-from voxelizer import VertexAI3DEstimator
+from voxelizer import HuggingFace3DEstimator
 from quantizer import VoxelQuantizer
 from color_quantizer import ColorQuantizer
 from hybrid_assembler import HybridAssembler
@@ -23,8 +23,8 @@ app.add_middleware(
 )
 
 print("Initializing AI Pipeline...")
-depth_estimator = VertexAI3DEstimator()
-voxel_quantizer = VoxelQuantizer(max_dim_xy=60)
+depth_estimator = HuggingFace3DEstimator()
+voxel_quantizer = VoxelQuantizer(max_dim_xy=60, max_dim_z=4)
 color_quantizer = ColorQuantizer()
 print("Pipeline Ready.")
 

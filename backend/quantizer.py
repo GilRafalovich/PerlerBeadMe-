@@ -3,40 +3,33 @@ import cv2
 import trimesh
 
 class VoxelQuantizer:
-    def __init__(self, max_dim_xy=60):
+    def __init__(self, max_dim_xy=60, max_dim_z=4):
         """
         Handles the true 3D spatial quantization of a .obj mesh.
-        Limits dimensions to max_dim_xy (cubic) to maintain kid-friendly assembly.
+        Limits X/Y for detail, but strictly limits Z to max_dim_z for kid-friendly assembly.
         """
         self.max_dim_xy = max_dim_xy
+        self.max_dim_z = max_dim_z
 
-    def _generate_slotted_planes(self, matrix):
+    def _hollow_out(self, matrix):
         """
-        Decomposes the solid 3D matrix into two intersecting perpendicular 2D planes.
-        Calculates an exact 1-bead wide slot at their intersection so they can be friction-fitted together.
+        Removes internal voxels (the middle wall) to save beads and simplify assembly.
+        A voxel is removed if it is completely surrounded in 3D space.
         """
-        slotted = np.zeros_like(matrix)
-        
-        mid_x = matrix.shape[0] // 2
-        mid_y = matrix.shape[1] // 2
-        mid_z = matrix.shape[2] // 2
-        
-        # Extract Plane 1 (YZ plane at X=mid_x) and Plane 2 (XZ plane at Y=mid_y)
-        slotted[mid_x, :, :] = matrix[mid_x, :, :]
-        slotted[:, mid_y, :] = matrix[:, mid_y, :]
-        
-        # Create the 1-bead wide interlocking slots at the intersection line (X=mid_x, Y=mid_y)
-        # For Plane 1, slot from bottom to middle
-        slotted[mid_x, mid_y, :mid_z] = 0
-        
-        # For Plane 2, slot from middle to top
-        slotted[mid_x, mid_y, mid_z:] = 0
-        
-        return slotted
+        hollowed = matrix.copy()
+        for x in range(1, matrix.shape[0]-1):
+            for y in range(1, matrix.shape[1]-1):
+                for z in range(1, matrix.shape[2]-1):
+                    if matrix[x, y, z] == 1:
+                        if (matrix[x-1, y, z] == 1 and matrix[x+1, y, z] == 1 and
+                            matrix[x, y-1, z] == 1 and matrix[x, y+1, z] == 1 and
+                            matrix[x, y, z-1] == 1 and matrix[x, y, z+1] == 1):
+                            hollowed[x, y, z] = 0
+        return hollowed
 
     def spatial_quantize(self, img_rgb: np.ndarray, obj_path: str):
         """
-        Voxelizes a true 3D .obj mesh to max_dim_xy cubic, then extracts interlocking slotted planes.
+        Voxelizes a true 3D .obj mesh to max_dim_xy x max_dim_xy x max_dim_z.
         """
         h, w = img_rgb.shape[:2]
         
@@ -62,28 +55,36 @@ class VoxelQuantizer:
         voxel_grid = mesh.voxelized(pitch=pitch).fill()
         matrix = voxel_grid.matrix
         
-        # 3. Create Final Padded Cubic Matrix (max_dim_xy, max_dim_xy, max_dim_xy)
-        voxel_matrix = np.zeros((self.max_dim_xy, self.max_dim_xy, self.max_dim_xy), dtype=np.uint8)
-        x_len = min(matrix.shape[0], self.max_dim_xy)
-        y_len = min(matrix.shape[1], self.max_dim_xy)
-        z_len = min(matrix.shape[2], self.max_dim_xy)
+        # 3. Squash Z-axis into max_dim_z layers (e.g., 4 layers)
+        chunk_size = matrix.shape[2] / self.max_dim_z
+        z_squashed = np.zeros((matrix.shape[0], matrix.shape[1], self.max_dim_z), dtype=np.uint8)
+        
+        for z in range(self.max_dim_z):
+            start = int(z * chunk_size)
+            end = int((z + 1) * chunk_size) if z < self.max_dim_z - 1 else matrix.shape[2]
+            if start < end:
+                z_squashed[:, :, z] = np.max(matrix[:, :, start:end], axis=2)
+                
+        # 4. Create Final Padded Matrix (max_dim_xy, max_dim_xy, max_dim_z)
+        voxel_matrix = np.zeros((self.max_dim_xy, self.max_dim_xy, self.max_dim_z), dtype=np.uint8)
+        x_len = min(z_squashed.shape[0], self.max_dim_xy)
+        y_len = min(z_squashed.shape[1], self.max_dim_xy)
         
         x_start = (self.max_dim_xy - x_len) // 2
         y_start = (self.max_dim_xy - y_len) // 2
-        z_start = (self.max_dim_xy - z_len) // 2
         
-        voxel_matrix[x_start:x_start+x_len, y_start:y_start+y_len, z_start:z_start+z_len] = matrix[:x_len, :y_len, :z_len]
+        voxel_matrix[x_start:x_start+x_len, y_start:y_start+y_len, :] = z_squashed[:x_len, :y_len, :]
 
-        # 4. Generate Friction-Fit Slotted Planes
-        slotted_matrix = self._generate_slotted_planes(voxel_matrix)
+        # 5. Hollow out the middle to simplify assembly and reduce beads
+        voxel_matrix = self._hollow_out(voxel_matrix)
 
-        return padded_img, None, slotted_matrix
+        return padded_img, None, voxel_matrix
 
 if __name__ == "__main__":
     print("Testing Spatial Quantizer...")
     dummy_img = np.zeros((100, 100, 3), dtype=np.uint8)
     dummy_depth = np.random.rand(100, 100)
     
-    quantizer = VoxelQuantizer(max_dim_xy=60)
+    quantizer = VoxelQuantizer(max_dim_xy=60, max_dim_z=4)
     # Note: Requires a valid .obj file for actual spatial_quantize testing
-    print("Successfully initialized Slotted Voxel Quantizer!")
+    print("Successfully initialized Voxel Quantizer!")

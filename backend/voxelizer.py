@@ -1,39 +1,42 @@
 import os
-import torch
-import cv2
-import numpy as np
-import requests
+import shutil
+from gradio_client import Client, handle_file
 
-class VertexAI3DEstimator:
+class HuggingFace3DEstimator:
     """
-    Communicates with the Google Cloud Vertex AI Custom Endpoint
-    running the generative 3D model (TripoSR).
+    Communicates with the official free HuggingFace TripoSR space
+    to completely automate the 3D generation process.
     """
-    def __init__(self, endpoint_url=None):
-        self.endpoint_url = endpoint_url or os.environ.get("VERTEX_AI_ENDPOINT_URL", "")
+    def __init__(self):
+        print("Connecting to HuggingFace TripoSR GPU Server...")
+        self.client = Client("stabilityai/TripoSR")
         
     def generate_3d_mesh(self, image_path: str, output_obj_path: str):
         """
-        Sends the 2D image to the Vertex AI Endpoint.
-        Downloads the generated .obj file.
+        Sends the 2D image to HuggingFace, runs background removal,
+        generates the 3D mesh, and downloads the .obj file.
         """
-        if not self.endpoint_url:
-            print("VERTEX_AI_ENDPOINT_URL not set. Using local mock generation for testing...")
-            # Local Mock: Generate a simple 3D mesh for testing without GCP deployment
-            import trimesh
-            mesh = trimesh.creation.icosphere(subdivisions=2, radius=10)
-            mesh.export(output_obj_path)
-            return output_obj_path
-            
-        print(f"Sending image to Vertex AI Endpoint: {self.endpoint_url}")
-        with open(image_path, "rb") as f:
-            files = {"file": (os.path.basename(image_path), f, "image/png")}
-            response = requests.post(self.endpoint_url, files=files)
-            
-        if response.status_code == 200:
-            with open(output_obj_path, "wb") as f:
-                f.write(response.content)
-            print(f"Successfully retrieved 3D mesh: {output_obj_path}")
-            return output_obj_path
-        else:
-            raise Exception(f"Vertex AI Endpoint Failed: {response.status_code} - {response.text}")
+        print("1. Removing Background (HuggingFace)...")
+        # The /preprocess endpoint takes: input_image, remove_background, foreground_ratio
+        processed_image_path = self.client.predict(
+            handle_file(image_path),
+            True,
+            0.85,
+            api_name="/preprocess"
+        )
+        
+        print("2. Generating 3D Mesh (HuggingFace GPUs)...")
+        # The /generate endpoint takes: processed_image, marching_cubes_resolution
+        result = self.client.predict(
+            handle_file(processed_image_path),
+            256,
+            api_name="/generate"
+        )
+        
+        # Result is a tuple: (obj_path, glb_path)
+        hf_obj_path = result[0]
+        
+        print("3. Downloading 3D Mesh...")
+        shutil.copy2(hf_obj_path, output_obj_path)
+        print(f"Successfully retrieved 3D mesh: {output_obj_path}")
+        return output_obj_path

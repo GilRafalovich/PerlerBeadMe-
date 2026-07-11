@@ -16,3 +16,6 @@ if "status" in data:
     print("Status:", data["status"])
 if "message" in data:
     print("Message:", data["message"])
+if "voxel_matrix" in data:
+    matrix = np.array(data["voxel_matrix"])
+    print("Bead count:", np.sum(matrix))

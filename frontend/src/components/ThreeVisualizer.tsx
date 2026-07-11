@@ -40,16 +40,25 @@ export const ThreeVisualizer: React.FC<ThreeVisualizerProps> = ({ voxelShape, vo
 
   useEffect(() => {
     if (meshRef.current && instances.length > 0) {
-      const dummy = new THREE.Object3D();
-      instances.forEach((inst, i) => {
-        dummy.position.set(...inst.position);
-        dummy.updateMatrix();
-        meshRef.current!.setMatrixAt(i, dummy.matrix);
-        meshRef.current!.setColorAt(i, inst.color);
-      });
-      meshRef.current.instanceMatrix.needsUpdate = true;
-      if (meshRef.current.instanceColor) {
+      try {
+        if (!meshRef.current.instanceColor) {
+          meshRef.current.instanceColor = new THREE.InstancedBufferAttribute(
+            new Float32Array(20000 * 3), 3
+          );
+        }
+        
+        const dummy = new THREE.Object3D();
+        instances.forEach((inst, i) => {
+          dummy.position.set(...inst.position);
+          dummy.updateMatrix();
+          meshRef.current!.setMatrixAt(i, dummy.matrix);
+          meshRef.current!.setColorAt(i, inst.color);
+        });
+        
+        meshRef.current.instanceMatrix.needsUpdate = true;
         meshRef.current.instanceColor.needsUpdate = true;
+      } catch (err) {
+        console.error("Error updating instances:", err);
       }
     }
   }, [instances]);
@@ -66,7 +75,7 @@ export const ThreeVisualizer: React.FC<ThreeVisualizerProps> = ({ voxelShape, vo
       <OrbitControls target={center} makeDefault />
       
       {instances.length > 0 ? (
-        <instancedMesh ref={meshRef} args={[geometry, material, instances.length]} />
+        <instancedMesh ref={meshRef} args={[geometry, material, 20000]} count={instances.length} />
       ) : (
         <mesh position={center}>
           <boxGeometry args={voxelShape || [20, 20, 20]} />
