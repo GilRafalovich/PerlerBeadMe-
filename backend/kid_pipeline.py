@@ -75,7 +75,16 @@ def run_kid_mode(
     quantized = color_q.quantize(framed)
     if params.max_colors:
         vq_tmp = VoxelQuantizer(kid_params=params)
-        quantized = vq_tmp.limit_colors(quantized, params.max_colors)
+        reserve = None
+        if (
+            bool(getattr(params, "feature_protect", False))
+            and params.color_mode == "image_project"
+        ):
+            from feature_protect import reserved_feature_colors
+            reserve = reserved_feature_colors()
+        quantized = vq_tmp.limit_colors(
+            quantized, params.max_colors, reserve_rgbs=reserve
+        )
 
     cv2.imwrite(
         os.path.join(out_dir, "03_palette_quantized.png"),
@@ -140,6 +149,21 @@ def run_kid_mode(
     orient = getattr(vq, "_last_orient_info", None)
     if orient:
         summary["orientation"] = orient
+    feat = getattr(vq, "_last_feature_report", None)
+    if feat:
+        summary["feature_protect"] = feat
+
+    # Feature visibility gate (Verification): alongside shape composite, no histogram.
+    feature_gate = None
+    if bool(getattr(used_params, "feature_protect", False)) or feat:
+        from feature_protect import evaluate_feature_visibility
+
+        feature_gate = evaluate_feature_visibility(
+            feat,
+            enabled=bool(getattr(used_params, "feature_protect", False)) or bool(feat),
+        )
+        summary["feature_gate"] = feature_gate
+
     gate = getattr(vq, "_last_verify_gate", None)
     if gate:
         # Persist verify renders/overlays under out_dir/verify/
@@ -161,13 +185,25 @@ def run_kid_mode(
                 ov = os.path.join(verify_dir, f"overlay_{view}.png")
                 save_overlay(ref, img, ov, title=f"verify/{view}")
             gate_public = {k: v for k, v in gate.items() if k != "renders"}
+            if feature_gate is not None:
+                gate_public["feature_gate"] = feature_gate
             with open(os.path.join(verify_dir, "gate_report.json"), "w") as f:
                 json.dump(gate_public, f, indent=2)
             summary["verify_gate"] = gate_public
             summary["verify_dir"] = verify_dir
         except Exception as e:
             summary["verify_gate"] = {k: v for k, v in gate.items() if k != "renders"}
+            if feature_gate is not None:
+                summary["verify_gate"]["feature_gate"] = feature_gate
             summary["verify_gate"]["artifact_error"] = str(e)
+    elif feature_gate is not None:
+        # Shape gate off/missing but feature_protect ran — still persist feature_gate.
+        verify_dir = os.path.join(out_dir, "verify")
+        os.makedirs(verify_dir, exist_ok=True)
+        gate_public = {"feature_gate": feature_gate}
+        with open(os.path.join(verify_dir, "gate_report.json"), "w") as f:
+            json.dump(gate_public, f, indent=2)
+        summary["verify_dir"] = verify_dir
 
     if restyle_meta is not None:
         summary["restyle"] = restyle_meta.to_dict()
@@ -187,6 +223,14 @@ def run_kid_mode(
         )
         if not vg.get("passed"):
             print(f"VERIFY GATE FAIL: {vg.get('fail_reason')}")
+    if summary.get("feature_gate"):
+        fg = summary["feature_gate"]
+        print(
+            f"feature_gate passed={fg.get('passed')} score={fg.get('score')} "
+            f"reason={fg.get('fail_reason')}"
+        )
+        if not fg.get("passed"):
+            print(f"FEATURE GATE FAIL: {fg.get('fail_reason')}")
     print(f"out={out_dir}")
     return summary
 
@@ -245,6 +289,12 @@ def main():
     ap.add_argument("--footprint", type=int, default=18)
     ap.add_argument("--layers", type=int, default=10)
     ap.add_argument("--max-colors", type=int, default=5)
+    ap.add_argument(
+        "--color-mode",
+        choices=["structural", "image_project"],
+        default="structural",
+        help="Voxel coloring: structural height bands, or project photo colors onto layers",
+    )
     ap.add_argument("--yaw", type=float, default=None, help="Force yaw degrees (skip auto)")
     ap.add_argument("--no-auto-yaw", action="store_true")
     ap.add_argument("--up-axis", type=int, default=None, choices=[0, 1, 2],
@@ -262,6 +312,38 @@ def main():
         "--procedural-dog",
         action="store_true",
         help="Use built-in standing-dog mesh (clear head/ears/legs) instead of --mesh",
+    )
+    ap.add_argument(
+        "--feature-protect",
+        dest="feature_protect",
+        action="store_true",
+        default=True,
+        help="Force cheeks/eyes/ear tips (Red/Black) after image_project (default on)",
+    )
+    ap.add_argument(
+        "--no-feature-protect",
+        dest="feature_protect",
+        action="store_false",
+        help="Disable feature preservation inject",
+    )
+    ap.add_argument("--feature-min-cheek", type=int, default=2,
+                    help="Min Red beads per cheek side (default 2)")
+    ap.add_argument("--feature-min-eye", type=int, default=1,
+                    help="Min Black beads per eye (default 1)")
+    ap.add_argument("--feature-min-ear-tip", type=int, default=1,
+                    help="Min Black beads per ear tip (default 1)")
+    ap.add_argument(
+        "--feature-eye-geometric-fallback",
+        dest="feature_eye_geometric_fallback",
+        action="store_true",
+        default=False,
+        help="Debug: allow geometric eye seed/hits when photo eyes miss (default off)",
+    )
+    ap.add_argument(
+        "--no-feature-eye-geometric-fallback",
+        dest="feature_eye_geometric_fallback",
+        action="store_false",
+        help="Disable geometric eye fallback (default)",
     )
     ap.add_argument("--title", default="Kid Perler Dog")
     ap.add_argument(
@@ -328,6 +410,7 @@ def main():
         base_widen_layers=2,
         base_widen_iters=1,
         max_colors=args.max_colors,
+        color_mode=args.color_mode,
         yaw_deg=args.yaw,
         auto_yaw=not args.no_auto_yaw and args.yaw is None,
         up_axis=args.up_axis if args.up_axis is not None else 1,
@@ -336,6 +419,14 @@ def main():
         verify_gate=not args.no_verify_gate,
         verify_error_threshold=args.verify_threshold,
         verify_retry_alt_axes=not args.no_verify_gate,
+        feature_protect=bool(args.feature_protect),
+        feature_min_cheek=int(args.feature_min_cheek),
+        feature_min_eye=int(args.feature_min_eye),
+        feature_min_ear_tip=int(args.feature_min_ear_tip),
+        feature_eye_geometric_fallback=bool(
+            getattr(args, "feature_eye_geometric_fallback", False)
+        ),
+        feature_mask_dir=os.path.join(args.out, "feature_masks"),
     )
     # Avoid double-restyle inside run_kid_mode if we already wrote 02_restyled
     do_restyle = args.restyle and not os.path.exists(os.path.join(args.out, "02_restyled.png"))

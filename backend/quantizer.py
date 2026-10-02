@@ -51,6 +51,15 @@ class KidModeParams:
     verify_retry_alt_axes: bool = True
     # Crop empty margins tightly after voxelize (pad cells)
     crop_pad: int = 0
+    # Feature preservation (image_project): force cheeks/eyes/ear tips
+    feature_protect: bool = True
+    feature_min_cheek: int = 2
+    feature_min_eye: int = 1
+    feature_min_ear_tip: int = 1
+    # Epic 2: geometric eye seed/hits OFF by default (photo detection required)
+    feature_eye_geometric_fallback: bool = False
+    # Optional debug dir for feature_masks/*.png (set by kid_pipeline)
+    feature_mask_dir: Optional[str] = None
 
 
 DEFAULT_KID_PARAMS = KidModeParams()
@@ -327,22 +336,17 @@ class VoxelQuantizer:
         pancakes: np.ndarray,
         ref_rgb: np.ndarray,
     ) -> float:
-        """Lower is better: composite_error of front(+side) voxel render vs ref."""
-        from backward_verify import (
-            composite_error,
-            render_voxel_ortho,
-            score_views,
-        )
+        """Lower is better: front-only composite_error vs photo (never avg with side)."""
+        from backward_verify import render_voxel_ortho, score_views
 
         # Neutral gray colors — orientation is shape-only (no histogram)
         colors = np.zeros((*pancakes.shape, 3), dtype=np.uint8)
         colors[pancakes > 0] = (180, 180, 180)
         renders = {
             "front": render_voxel_ortho(pancakes, colors, "front", 128),
-            "side": render_voxel_ortho(pancakes, colors, "side", 128),
         }
         _rows, summary = score_views(
-            ref_rgb, renders, size=128, silhouette_weight=0.35
+            ref_rgb, renders, size=128, silhouette_weight=0.45
         )
         return float(summary["composite_error"])
 
@@ -359,7 +363,8 @@ class VoxelQuantizer:
         - Else: maximize side-silhouette feature score (legacy).
         """
         candidates = candidates or [
-            0, 30, 45, 60, 90, 120, 135, 150, 180, 210, 240, 270, 300, 330
+            0, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165,
+            180, 195, 210, 225, 240, 255, 270, 285, 300, 315, 330, 345,
         ]
         use_photo = (
             ref_rgb is not None
@@ -516,19 +521,82 @@ class VoxelQuantizer:
         x1 = min(w, xs.max() + pad_x + 1)
         return img_rgb[y0:y1, x0:x1]
 
-    def limit_colors(self, quantized_rgb: np.ndarray, max_colors: int) -> np.ndarray:
-        """Keep the N most frequent palette colors; remap others to nearest kept."""
+    def limit_colors(
+        self,
+        quantized_rgb: np.ndarray,
+        max_colors: int,
+        reserve_rgbs: Optional[List[Tuple[int, int, int]]] = None,
+    ) -> np.ndarray:
+        """Keep the N most frequent palette colors; remap others to nearest kept.
+
+        Uses int32 distances — int16 overflows on bright colors (e.g. Yellow→Black).
+        Also protects a few high-saturation accent colors (cheeks/eyes) even if rare.
+        reserve_rgbs: forced-keep colors (e.g. Black/Red for feature_protect) that
+        must survive even when rare — they displace the least-saturated keep slot.
+        """
         if max_colors is None or max_colors <= 0:
             return quantized_rgb
         flat = quantized_rgb.reshape(-1, 3)
         uniq, counts = np.unique(flat, axis=0, return_counts=True)
-        if len(uniq) <= max_colors:
+        reserve = [tuple(int(x) for x in r) for r in (reserve_rgbs or [])]
+        if len(uniq) <= max_colors and not reserve:
             return quantized_rgb
         order = np.argsort(-counts)
-        keep = uniq[order[:max_colors]].astype(np.int16)
-        # Vectorized nearest-keep remap
+        keep_list = [tuple(int(x) for x in uniq[i]) for i in order[:max_colors]]
+        # Protect high-sat accents (red cheeks etc.) that frequency ranking drops
+        accent_slots = max(1, min(2, max_colors // 3))
+        scored_accents = []
+        for rgb, c in zip(uniq, counts):
+            r, g, b = [int(x) for x in rgb]
+            sat = max(r, g, b) - min(r, g, b)
+            if sat < 80:
+                continue
+            t = (r, g, b)
+            if t in keep_list:
+                continue
+            scored_accents.append((sat * np.sqrt(float(c) + 1.0), t))
+        scored_accents.sort(reverse=True)
+        for _, t in scored_accents[:accent_slots]:
+            # Replace the least-saturated kept color (usually grey/bg)
+            def _sat(rgb):
+                return max(rgb) - min(rgb)
+            victim_i = min(range(len(keep_list)), key=lambda i: _sat(keep_list[i]))
+            if _sat(keep_list[victim_i]) < _sat(t):
+                keep_list[victim_i] = t
+        # Reserve protected feature colors (Black/Red) — never drop them
+        if reserve:
+            uniq_set = {tuple(int(x) for x in u) for u in uniq}
+            def _sat(rgb):
+                return max(rgb) - min(rgb)
+            for t in reserve:
+                if t in keep_list:
+                    continue
+                # Prefer swapping in a reserved color that exists in the image;
+                # still inject Black/Red even if absent so remaps have a target.
+                if len(keep_list) < max_colors:
+                    keep_list.append(t)
+                    continue
+                # Don't displace another reserved color
+                candidates = [
+                    i for i, k in enumerate(keep_list) if k not in reserve
+                ]
+                if not candidates:
+                    continue
+                victim_i = min(candidates, key=lambda i: _sat(keep_list[i]))
+                keep_list[victim_i] = t
+            keep_list = keep_list[:max_colors]
+        # If nothing was trimmed and reserves already present, skip remap
+        uniq_tuples = [tuple(int(x) for x in u) for u in uniq]
+        if (
+            len(uniq_tuples) <= max_colors
+            and all(t in uniq_tuples for t in reserve)
+            and set(keep_list) >= set(uniq_tuples)
+        ):
+            return quantized_rgb
+        keep = np.array(keep_list, dtype=np.int32)
+        # int32 distances — avoid int16 overflow on (235)^2 etc.
         d = np.sum(
-            (flat.astype(np.int16)[:, None, :] - keep[None, :, :]) ** 2, axis=2
+            (flat.astype(np.int32)[:, None, :] - keep[None, :, :]) ** 2, axis=2
         )
         out = keep[np.argmin(d, axis=1)]
         return out.reshape(quantized_rgb.shape).astype(np.uint8)
@@ -568,25 +636,162 @@ class VoxelQuantizer:
         - image_project: framed photo bands onto layers (default)
         - structural: map by height/region using subject palette (better for
           procedural meshes + busy photo backgrounds)
+        When feature_protect and image_project: reserve Black/Red through
+        limit_colors, then inject detected cheeks/eyes/ear tips after project.
         """
         params = params or self.kid_params
         framed = self.crop_subject_rgb(quantized_rgb)
+        do_feat = (
+            bool(getattr(params, "feature_protect", False))
+            and params.color_mode == "image_project"
+        )
+        reserve = None
+        if do_feat:
+            from feature_protect import reserved_feature_colors
+            reserve = reserved_feature_colors()
         if params.max_colors:
-            framed = self.limit_colors(framed, params.max_colors)
+            framed = self.limit_colors(framed, params.max_colors, reserve_rgbs=reserve)
 
         if params.color_mode == "structural":
             return self._color_volume_structural(voxel, framed, params)
 
+        colors = self._color_volume_image_project(voxel, framed, params)
+        if do_feat:
+            from feature_protect import apply_feature_protect
+            sub_mask = self._subject_color_mask(framed)
+            colors, feat_report = apply_feature_protect(
+                colors,
+                voxel,
+                framed,
+                sub_mask,
+                min_cheek=int(getattr(params, "feature_min_cheek", 2)),
+                min_eye=int(getattr(params, "feature_min_eye", 1)),
+                min_ear_tip=int(getattr(params, "feature_min_ear_tip", 1)),
+                debug_dir=getattr(params, "feature_mask_dir", None),
+                eye_geometric_fallback=bool(
+                    getattr(params, "feature_eye_geometric_fallback", False)
+                ),
+            )
+            self._last_feature_report = feat_report
+        return colors
+
+    def _subject_color_mask(self, framed: np.ndarray) -> np.ndarray:
+        """Mask subject vs background via border flood-fill.
+
+        Flood only from border seeds that look like scenery (not warm body
+        colors). Warm yellow/orange/red never seed the flood, so a tight crop
+        that touches the character still keeps the body as subject.
+        """
+        if framed.size == 0:
+            return np.zeros(framed.shape[:2], dtype=bool)
+        h, w = framed.shape[:2]
+
+        def _is_warm_body(rgb) -> bool:
+            r, g, b = [int(x) for x in rgb]
+            bright = (r + g + b) / 3.0
+            sat = max(r, g, b) - min(r, g, b)
+            warm = (r + g) / 2.0 - b
+            # Yellow / orange / red character paints
+            if sat >= 40 and warm >= 25 and bright >= 80:
+                return True
+            if r > 160 and r > g + 30 and r > b + 30:  # red cheeks
+                return True
+            return False
+
+        ff_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
+        work = framed.copy()
+        lo, up = 25, 25
+        seeds = []
+        for x in range(w):
+            seeds.append((x, 0))
+            seeds.append((x, h - 1))
+        for y in range(h):
+            seeds.append((0, y))
+            seeds.append((w - 1, y))
+        for x, y in seeds:
+            if ff_mask[y + 1, x + 1]:
+                continue
+            if _is_warm_body(framed[y, x]):
+                continue
+            cv2.floodFill(
+                work, ff_mask, (x, y), (0, 0, 0),
+                loDiff=(lo, lo, lo), upDiff=(up, up, up),
+                flags=4 | (255 << 8) | cv2.FLOODFILL_MASK_ONLY,
+            )
+        bg = ff_mask[1:-1, 1:-1] > 0
+        subject = ~bg
+        if float(subject.mean()) < 0.02 or float(subject.mean()) > 0.98:
+            hsv = cv2.cvtColor(framed, cv2.COLOR_RGB2HSV)
+            sat, val = hsv[:, :, 1], hsv[:, :, 2]
+            warm = framed.astype(np.int16)
+            warm_score = (warm[:, :, 0].astype(np.int16) + warm[:, :, 1]) / 2 - warm[:, :, 2]
+            subject = ((sat > 45) & (val > 55) & (warm_score > 15))
+        num, labels, stats, _ = cv2.connectedComponentsWithStats(
+            subject.astype(np.uint8), connectivity=8
+        )
+        if num > 1:
+            areas = [(i, stats[i, cv2.CC_STAT_AREA]) for i in range(1, num)]
+            if areas:
+                best = max(areas, key=lambda t: t[1])[0]
+                subject = labels == best
+        subject_u8 = subject.astype(np.uint8) * 255
+        subject_u8 = cv2.morphologyEx(
+            subject_u8, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2
+        )
+        return subject_u8 > 0
+
+    def _color_volume_image_project(
+        self, voxel: np.ndarray, framed: np.ndarray, params: KidModeParams
+    ) -> np.ndarray:
+        """Project photo colors onto voxel pancakes, ignoring flat background."""
         fx, fz, h = voxel.shape
         colors = np.zeros((fx, fz, h, 3), dtype=np.uint8)
-        qh = framed.shape[0]
+        sub_mask = self._subject_color_mask(framed)
+        # Fill background with subject majority so resize doesn't smear brown/grey bg
+        sub_pixels = framed[sub_mask]
+        if len(sub_pixels) > 0:
+            uniq, counts = np.unique(sub_pixels.reshape(-1, 3), axis=0, return_counts=True)
+            # Prefer warm bright body colors (yellow/orange) over dark brown fill
+            scored = []
+            for rgb, c in zip(uniq, counts):
+                r, g, b = [int(x) for x in rgb]
+                warm = (r + g) / 2.0 - b
+                bright = (r + g + b) / 3.0
+                score = float(c) * (1.0 + 0.004 * max(0.0, warm) + 0.002 * bright)
+                # Penalize dark brownish fills for character bodies
+                if r < 140 and g < 100 and b < 80 and bright < 120:
+                    score *= 0.35
+                scored.append((score, rgb))
+            scored.sort(reverse=True)
+            majority = np.array(scored[0][1], dtype=np.uint8)
+        else:
+            majority = np.array([235, 203, 67], dtype=np.uint8)  # Perler Yellow fallback
+            sub_mask = np.ones(framed.shape[:2], dtype=bool)
+        filled = framed.copy()
+        filled[~sub_mask] = majority
+        # Tight subject bbox for better spatial alignment with occupancy
+        ys, xs = np.where(sub_mask)
+        if len(xs) >= 20:
+            y0b, y1b = int(ys.min()), int(ys.max()) + 1
+            x0b, x1b = int(xs.min()), int(xs.max()) + 1
+            pad_y = max(1, (y1b - y0b) // 20)
+            pad_x = max(1, (x1b - x0b) // 20)
+            y0b = max(0, y0b - pad_y)
+            y1b = min(filled.shape[0], y1b + pad_y)
+            x0b = max(0, x0b - pad_x)
+            x1b = min(filled.shape[1], x1b + pad_x)
+            filled = filled[y0b:y1b, x0b:x1b]
+            sub_mask = sub_mask[y0b:y1b, x0b:x1b]
+        qh = filled.shape[0]
         for z in range(h):
             row_frac = 1.0 - (z + 0.5) / max(1, h)
             y0 = int(row_frac * (qh - 1))
-            band = framed[max(0, y0 - qh // 12) : min(qh, y0 + qh // 12) + 1]
+            half = max(1, qh // 12)
+            band = filled[max(0, y0 - half) : min(qh, y0 + half) + 1]
             if band.size == 0:
-                band = framed
-            band_small = cv2.resize(band, (fz, fx), interpolation=cv2.INTER_AREA)
+                band = filled
+            # INTER_NEAREST keeps palette colors; AREA would blend toward brown
+            band_small = cv2.resize(band, (fz, fx), interpolation=cv2.INTER_NEAREST)
             mask = voxel[:, :, z] > 0
             colors[:, :, z][mask] = band_small[mask]
         return colors
@@ -731,21 +936,26 @@ class VoxelQuantizer:
         voxel: np.ndarray,
         colors: np.ndarray,
         ref_rgb: np.ndarray,
-        silhouette_weight: float = 0.35,
+        silhouette_weight: float = 0.45,
         size: int = 256,
     ) -> dict:
-        """Shape-only composite vs reference (SSIM / LPIPS-lite / sil IoU)."""
+        """Shape-only composite vs photo. Gate uses FRONT only; side kept for diagnosis."""
         from backward_verify import render_voxel_ortho, score_views
 
         renders = {
             "front": render_voxel_ortho(voxel, colors, "front", size),
             "side": render_voxel_ortho(voxel, colors, "side", size),
         }
-        rows, summary = score_views(
-            ref_rgb, renders, size=size, silhouette_weight=silhouette_weight
+        # Photo is a single view — do not average side into the gate score.
+        front_rows, front_summary = score_views(
+            ref_rgb, {"front": renders["front"]}, size=size, silhouette_weight=silhouette_weight
         )
+        side_rows, _side_summary = score_views(
+            ref_rgb, {"side": renders["side"]}, size=size, silhouette_weight=silhouette_weight
+        )
+        rows = front_rows + side_rows
         return {
-            **summary,
+            **front_summary,
             "views": [
                 {
                     "view": r.view,
@@ -757,6 +967,7 @@ class VoxelQuantizer:
                 for r in rows
             ],
             "renders": renders,
+            "score_basis": "front_only_vs_photo",
         }
 
     def voxelize_kid_with_verify_gate(

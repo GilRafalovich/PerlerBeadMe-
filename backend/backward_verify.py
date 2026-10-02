@@ -149,7 +149,6 @@ def render_mesh_ortho(
         flip_d = False
 
     pts = v.copy()
-    # Normalize to [0,1] in ix/iy
     mins = pts.min(0)
     maxs = pts.max(0)
     span = np.maximum(maxs - mins, 1e-6)
@@ -157,14 +156,15 @@ def render_mesh_ortho(
     order = np.argsort(pts[:, depth] if not flip_d else -pts[:, depth])
     img = np.zeros((out_size, out_size, 3), dtype=np.uint8)
     img[:] = bg
-    # Leave margin
+    # Uniform letterbox scale (preserve aspect)
     margin = 0.08
-    xs = (pts[order, ix] - mins[ix]) / span[ix]
-    ys = (pts[order, iy] - mins[iy]) / span[iy]
-    # Fit both into square
-    px = ((margin + xs * (1 - 2 * margin)) * (out_size - 1)).astype(int)
-    # image y: top = high iy
-    py = ((1.0 - (margin + ys * (1 - 2 * margin))) * (out_size - 1)).astype(int)
+    usable = (1 - 2 * margin) * (out_size - 1)
+    scale = usable / max(span[ix], span[iy])
+    mid = (mins + maxs) / 2.0
+    cx = (out_size - 1) / 2.0
+    cy = (out_size - 1) / 2.0
+    px = (cx + (pts[order, ix] - mid[ix]) * scale).astype(int)
+    py = (cy - (pts[order, iy] - mid[iy]) * scale).astype(int)
     cols = vc[order]
     r = max(1, out_size // 128)
     for i in range(len(order)):
@@ -544,3 +544,413 @@ def red_pixel_fraction(rgb: np.ndarray) -> float:
         return 0.0
     red = (pix[:, 0] > 150) & (pix[:, 1] < 120) & (pix[:, 2] < 120)
     return float(red.mean())
+
+
+# ---------------------------------------------------------------------------
+# Photo-matched mesh orientation (standing axis + yaw + roll)
+# ---------------------------------------------------------------------------
+
+def standing_to_y_up_matrix(up_axis: int) -> np.ndarray:
+    """4x4 transform that maps mesh `up_axis` onto +Y (standing)."""
+    import trimesh
+
+    if up_axis == 1:
+        return np.eye(4)
+    if up_axis == 2:
+        # Z-up → Y-up: rotate -90° about X → (x,y,z) → (x,z,-y)
+        return trimesh.transformations.rotation_matrix(-np.pi / 2.0, [1, 0, 0])
+    if up_axis == 0:
+        # X-up → Y-up: rotate +90° about Z → (x,y,z) → (-y,x,z)
+        return trimesh.transformations.rotation_matrix(np.pi / 2.0, [0, 0, 1])
+    raise ValueError(f"Unsupported up_axis: {up_axis}")
+
+
+def apply_yaw_roll_y_up(mesh, yaw_deg: float = 0.0, roll_deg: float = 0.0, pitch_deg: float = 0.0):
+    """Rotate a Y-up mesh: yaw about Y, pitch about X, roll about Z (degrees)."""
+    import trimesh
+
+    m = mesh.copy()
+    if pitch_deg:
+        m.apply_transform(
+            trimesh.transformations.rotation_matrix(np.deg2rad(pitch_deg), [1, 0, 0])
+        )
+    if yaw_deg:
+        m.apply_transform(
+            trimesh.transformations.rotation_matrix(np.deg2rad(yaw_deg), [0, 1, 0])
+        )
+    if roll_deg:
+        m.apply_transform(
+            trimesh.transformations.rotation_matrix(np.deg2rad(roll_deg), [0, 0, 1])
+        )
+    return m
+
+
+def render_mesh_front_occupancy(
+    mesh,
+    out_size: int = 128,
+    bg: Tuple[int, int, int] = (255, 255, 255),
+    max_points: int = 12000,
+) -> np.ndarray:
+    """
+    Fast orthographic front render of a Y-up mesh (look along +Z).
+    Image X ← mesh X, Image Y ↑ mesh Y. Gray occupancy suitable for shape scoring.
+    """
+    v = np.asarray(mesh.vertices, dtype=np.float64)
+    if len(v) == 0:
+        img = np.zeros((out_size, out_size, 3), dtype=np.uint8)
+        img[:] = bg
+        return img
+    if len(v) > max_points:
+        idx = np.linspace(0, len(v) - 1, max_points).astype(np.int64)
+        v = v[idx]
+    mins = v.min(0)
+    maxs = v.max(0)
+    span = np.maximum(maxs - mins, 1e-6)
+    # Uniform scale so standing vs lying aspect is preserved (letterbox into square)
+    margin = 0.08
+    usable = (1 - 2 * margin) * (out_size - 1)
+    scale = usable / max(span[0], span[1])
+    # Depth sort: draw far first (large Z), near last
+    order = np.argsort(-v[:, 2])
+    cx = (out_size - 1) / 2.0
+    cy = (out_size - 1) / 2.0
+    mid = (mins + maxs) / 2.0
+    px = (cx + (v[:, 0] - mid[0]) * scale).astype(np.int32)
+    # image y: top = high mesh Y
+    py = (cy - (v[:, 1] - mid[1]) * scale).astype(np.int32)
+    px = np.clip(px, 0, out_size - 1)
+    py = np.clip(py, 0, out_size - 1)
+    # Occupancy raster via bincount, then soft gray
+    flat = py[order] * out_size + px[order]
+    occ = np.zeros(out_size * out_size, dtype=np.float32)
+    # unique last-write wins depth; accumulate density
+    np.add.at(occ, flat, 1.0)
+    occ = occ.reshape(out_size, out_size)
+    if occ.max() > 0:
+        dens = np.clip(occ / np.percentile(occ[occ > 0], 90), 0, 1)
+    else:
+        dens = occ
+    # Binary-ish subject with soft edge
+    mask = occ > 0
+    img = np.zeros((out_size, out_size, 3), dtype=np.uint8)
+    img[:] = bg
+    gray = (40 + dens * 160).astype(np.uint8)
+    for c in range(3):
+        ch = img[:, :, c]
+        ch[mask] = gray[mask]
+        img[:, :, c] = ch
+    # Mild dilate for solid silhouette (kid-readable)
+    k = np.ones((3, 3), np.uint8)
+    solid = cv2.dilate(mask.astype(np.uint8), k, iterations=1) > 0
+    img[solid & ~mask] = (120, 120, 120)
+    return img
+
+
+def _subject_aspect(rgb: np.ndarray) -> float:
+    """Height/width of subject bbox (large = taller than wide)."""
+    m = subject_mask(rgb)
+    ys, xs = np.where(m)
+    if len(xs) == 0:
+        return 1.0
+    return float(ys.max() - ys.min() + 1) / float(xs.max() - xs.min() + 1)
+
+
+def score_mesh_front_vs_photo(
+    mesh,
+    ref_rgb: np.ndarray,
+    size: int = 128,
+    silhouette_weight: float = 0.45,
+    aspect_weight: float = 0.20,
+) -> dict:
+    """Front-only shape score of Y-up mesh vs photo (no color histogram).
+
+    Adds an aspect-ratio penalty so letterboxed IoU cannot prefer a lying-down
+    blob that fills the square similarly to a standing subject.
+    """
+    cand = render_mesh_front_occupancy(mesh, out_size=size)
+    rows, summary = score_views(
+        ref_rgb, {"front": cand}, size=size, silhouette_weight=silhouette_weight
+    )
+    photo_asp = _subject_aspect(ref_rgb)
+    mesh_asp = _subject_aspect(cand)
+    asp_pen = float(abs(np.log((mesh_asp + 1e-6) / (photo_asp + 1e-6))))
+    base_err = float(summary["composite_error"])
+    out = dict(summary)
+    out["aspect_photo"] = photo_asp
+    out["aspect_mesh"] = mesh_asp
+    out["aspect_penalty"] = asp_pen
+    out["composite_error_raw"] = base_err
+    out["composite_error"] = base_err + aspect_weight * asp_pen
+    out["views"] = [
+        {
+            "view": r.view,
+            "ssim": r.ssim,
+            "lpips_lite": r.lpips_lite,
+            "silhouette_iou": r.silhouette_iou,
+            "composite_error": r.composite_error,
+        }
+        for r in rows
+    ]
+    out["render"] = cand
+    return out
+
+
+def align_mesh_to_photo(
+    mesh,
+    ref_rgb: np.ndarray,
+    yaw_step: float = 15.0,
+    roll_candidates: Optional[List[float]] = None,
+    pitch_candidates: Optional[List[float]] = None,
+    prefer_tallest_up: bool = True,
+    score_size: int = 128,
+    try_invert_up: bool = True,
+) -> dict:
+    """
+    Search standing-axis + yaw (+ optional roll/pitch) so a front ortho of the
+    mesh matches the photo pose. Maximizes photo-matched composite / sil IoU
+    (front-only — never averages a side view against a single photo).
+
+    Returns dict with aligned mesh (Y-up, photo-facing), transforms, and metrics.
+    """
+    import trimesh
+
+    roll_candidates = roll_candidates if roll_candidates is not None else [-20.0, -10.0, 0.0, 10.0, 20.0]
+    pitch_candidates = pitch_candidates if pitch_candidates is not None else [-20.0, -10.0, 0.0, 10.0, 20.0]
+    extents = np.asarray(mesh.extents, dtype=np.float64)
+    if prefer_tallest_up:
+        # Standing axis = tallest extent only. Photo match searches yaw/roll/pitch
+        # on that axis (not alternate up-axes that can fake IoU when leaning).
+        up_candidates = [int(np.argmax(extents))]
+    else:
+        up_candidates = [0, 1, 2]
+
+    yaws = list(np.arange(0.0, 360.0, float(yaw_step)))
+    best = None
+    trials = []
+    invert_flags = [False, True] if try_invert_up else [False]
+
+    for up in up_candidates:
+        T_up = standing_to_y_up_matrix(up)
+        base0 = mesh.copy()
+        base0.apply_transform(T_up)
+        base0.vertices -= base0.bounds.mean(axis=0)
+        for invert in invert_flags:
+            base = base0.copy()
+            if invert:
+                # Flip standing direction (feet <-> head) via 180° about X
+                base.apply_transform(
+                    __import__("trimesh").transformations.rotation_matrix(np.pi, [1, 0, 0])
+                )
+                base.vertices -= base.bounds.mean(axis=0)
+            for yaw in yaws:
+                for roll in roll_candidates:
+                    for pitch in pitch_candidates:
+                        try:
+                            m = apply_yaw_roll_y_up(
+                                base, yaw_deg=yaw, roll_deg=roll, pitch_deg=pitch
+                            )
+                            sc = score_mesh_front_vs_photo(m, ref_rgb, size=score_size)
+                        except Exception as e:
+                            trials.append({
+                                "up_axis": up, "invert_up": invert, "yaw_deg": yaw,
+                                "roll_deg": roll, "pitch_deg": pitch, "error": str(e),
+                            })
+                            continue
+                        row = {
+                            "up_axis": up,
+                            "invert_up": bool(invert),
+                            "yaw_deg": float(yaw),
+                            "roll_deg": float(roll),
+                            "pitch_deg": float(pitch),
+                            "composite_error": float(sc["composite_error"]),
+                            "composite_error_raw": float(sc.get("composite_error_raw", sc["composite_error"])),
+                            "aspect_mesh": float(sc.get("aspect_mesh", 0)),
+                            "aspect_penalty": float(sc.get("aspect_penalty", 0)),
+                            "mean_ssim": float(sc["mean_ssim"]),
+                            "mean_lpips_lite": float(sc["mean_lpips_lite"]),
+                            "mean_silhouette_iou": float(sc["mean_silhouette_iou"]),
+                        }
+                        trials.append(row)
+                        key = (row["composite_error"], -row["mean_silhouette_iou"])
+                        if best is None or key < best["key"]:
+                            best = {
+                                "key": key,
+                                "mesh": m,
+                                "metrics": sc,
+                                "invert_up": bool(invert),
+                                **{k: row[k] for k in (
+                                    "up_axis", "yaw_deg", "roll_deg", "pitch_deg",
+                                    "composite_error", "mean_ssim", "mean_lpips_lite",
+                                    "mean_silhouette_iou",
+                                )},
+                            }
+        # Prefer tallest; only skip other axes if aspect+IoU already look standing
+        if (
+            best
+            and prefer_tallest_up
+            and best["mean_silhouette_iou"] >= 0.55
+            and float(best["metrics"].get("aspect_mesh", 0)) >= 0.85
+        ):
+            break
+
+    if best is None:
+        raise RuntimeError("align_mesh_to_photo: no successful orientation trial")
+
+    # Finer yaw/roll/pitch refine around best
+    import trimesh as _tm
+    refine_step = max(5.0, float(yaw_step) / 3.0)
+    base_up = mesh.copy()
+    base_up.apply_transform(standing_to_y_up_matrix(best["up_axis"]))
+    base_up.vertices -= base_up.bounds.mean(axis=0)
+    if best.get("invert_up"):
+        base_up.apply_transform(_tm.transformations.rotation_matrix(np.pi, [1, 0, 0]))
+        base_up.vertices -= base_up.bounds.mean(axis=0)
+    pitch_refine = sorted(set(
+        [best["pitch_deg"], best["pitch_deg"] - refine_step, best["pitch_deg"] + refine_step]
+        + list(pitch_candidates)
+    ))
+    for dy in (-2 * refine_step, -refine_step, 0.0, refine_step, 2 * refine_step):
+        yaw = (best["yaw_deg"] + dy) % 360.0
+        for roll in sorted(set([best["roll_deg"], 0.0] + list(roll_candidates))):
+            for pitch in pitch_refine:
+                try:
+                    m = apply_yaw_roll_y_up(
+                        base_up, yaw_deg=yaw, roll_deg=roll, pitch_deg=pitch
+                    )
+                    sc = score_mesh_front_vs_photo(m, ref_rgb, size=score_size)
+                except Exception:
+                    continue
+                row_key = (float(sc["composite_error"]), -float(sc["mean_silhouette_iou"]))
+                if row_key < best["key"]:
+                    best = {
+                        "key": row_key,
+                        "mesh": m,
+                        "metrics": sc,
+                        "up_axis": best["up_axis"],
+                        "invert_up": bool(best.get("invert_up", False)),
+                        "yaw_deg": float(yaw),
+                        "roll_deg": float(roll),
+                        "pitch_deg": float(pitch),
+                        "composite_error": float(sc["composite_error"]),
+                        "mean_ssim": float(sc["mean_ssim"]),
+                        "mean_lpips_lite": float(sc["mean_lpips_lite"]),
+                        "mean_silhouette_iou": float(sc["mean_silhouette_iou"]),
+                    }
+
+    aligned = best["mesh"]
+    # Drop non-JSON bits from metrics copy
+    metrics_public = {
+        k: v for k, v in best["metrics"].items() if k != "render"
+    }
+    return {
+        "mesh": aligned,
+        "up_axis": int(best["up_axis"]),
+        "invert_up": bool(best.get("invert_up", False)),
+        "yaw_deg": float(best["yaw_deg"]),
+        "roll_deg": float(best["roll_deg"]),
+        "pitch_deg": float(best["pitch_deg"]),
+        "composite_error": float(best["composite_error"]),
+        "mean_ssim": float(best["mean_ssim"]),
+        "mean_lpips_lite": float(best["mean_lpips_lite"]),
+        "mean_silhouette_iou": float(best["mean_silhouette_iou"]),
+        "extents_original": [float(x) for x in extents],
+        "extents_aligned": [float(x) for x in aligned.extents],
+        "trials_top": sorted(
+            [t for t in trials if "composite_error" in t],
+            key=lambda t: (t["composite_error"], -t["mean_silhouette_iou"]),
+        )[:12],
+        "n_trials": len(trials),
+        "metrics": metrics_public,
+        "front_render": best["metrics"].get("render"),
+    }
+
+
+def export_aligned_mesh_with_overlays(
+    mesh_path: str,
+    photo_path: str,
+    out_dir: str,
+    aligned_name: str = "02_mesh_aligned.obj",
+    yaw_step: float = 15.0,
+) -> dict:
+    """
+    Align TripoSR mesh to photo pose, write OBJ + photo↔mesh overlays.
+    """
+    import trimesh
+
+    os.makedirs(out_dir, exist_ok=True)
+    mesh = trimesh.load(mesh_path, force="mesh")
+    ref = load_rgb(photo_path)
+    # Also try framed/crop subject for stabler sil matching
+    try:
+        from quantizer import VoxelQuantizer
+        ref_score = VoxelQuantizer.crop_subject_rgb(ref)
+    except Exception:
+        ref_score = ref
+
+    result = align_mesh_to_photo(mesh, ref_score, yaw_step=yaw_step)
+    aligned = result["mesh"]
+    obj_out = os.path.join(out_dir, aligned_name)
+    aligned.export(obj_out)
+
+    # Overlays: photo vs mesh front (occupancy + nicer point render)
+    front = result.get("front_render")
+    if front is None:
+        front = render_mesh_front_occupancy(aligned, out_size=256)
+    else:
+        front = render_mesh_front_occupancy(aligned, out_size=256)
+
+    nice = render_mesh_ortho(aligned, view="front", out_size=256, yaw_deg=0.0, up_axis=1)
+    ov1 = os.path.join(out_dir, "overlay_photo_vs_mesh_front.png")
+    ov2 = os.path.join(out_dir, "overlay_photo_vs_mesh_occupancy.png")
+    save_overlay(ref, nice, ov1, title="photo vs aligned mesh (front)")
+    save_overlay(ref, front, ov2, title="photo vs mesh occupancy (front)")
+    # Side-by-side simple strip
+    side_by_side = os.path.join(out_dir, "compare_photo_mesh_side_by_side.png")
+    r, c, _, _ = align_pair(ref, nice, size=256)
+    gap = 12
+    canvas = np.ones((256 + 40, 256 * 2 + gap, 3), dtype=np.uint8) * 245
+    canvas[36:36 + 256, 0:256] = r
+    canvas[36:36 + 256, 256 + gap :] = c
+    cv2.putText(canvas, "photo", (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 20, 20), 2)
+    cv2.putText(
+        canvas,
+        f"mesh up={result['up_axis']} yaw={result['yaw_deg']:.0f} roll={result['roll_deg']:.0f} pitch={result['pitch_deg']:.0f}",
+        (256 + gap + 8, 24),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        (20, 20, 20),
+        1,
+    )
+    cv2.imwrite(side_by_side, cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
+
+    # Raw mesh preview png
+    preview = os.path.join(out_dir, "02_mesh_aligned_preview.png")
+    cv2.imwrite(preview, cv2.cvtColor(nice, cv2.COLOR_RGB2BGR))
+
+    report = {
+        "mesh_in": os.path.abspath(mesh_path),
+        "photo": os.path.abspath(photo_path),
+        "aligned_obj": os.path.abspath(obj_out),
+        "up_axis": result["up_axis"],
+        "invert_up": result.get("invert_up", False),
+        "yaw_deg": result["yaw_deg"],
+        "roll_deg": result["roll_deg"],
+        "pitch_deg": result["pitch_deg"],
+        "composite_error": result["composite_error"],
+        "mean_ssim": result["mean_ssim"],
+        "mean_lpips_lite": result["mean_lpips_lite"],
+        "mean_silhouette_iou": result["mean_silhouette_iou"],
+        "extents_original": result["extents_original"],
+        "extents_aligned": result["extents_aligned"],
+        "n_trials": result["n_trials"],
+        "trials_top": result["trials_top"],
+        "overlays": {
+            "side_by_side": os.path.abspath(side_by_side),
+            "overlay_front": os.path.abspath(ov1),
+            "overlay_occupancy": os.path.abspath(ov2),
+            "preview": os.path.abspath(preview),
+        },
+    }
+    with open(os.path.join(out_dir, "02_mesh_align_report.json"), "w") as f:
+        json.dump(report, f, indent=2)
+    return report
