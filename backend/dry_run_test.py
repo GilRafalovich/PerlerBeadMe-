@@ -1,3 +1,11 @@
+"""Legacy dry-run (Windows paths / Vertex). For kid_mode smoke on this box, use:
+
+  python dry_run_kid.py --procedural-dog \\
+      --image demo_dog_kid_pipeline/ref_candidates/pixabay_side.jpg \\
+      --out demo_dog_kid_pipeline
+
+Or: python kid_pipeline.py --help
+"""
 import os
 import json
 import numpy as np

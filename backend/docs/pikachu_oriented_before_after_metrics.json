@@ -1,0 +1,34 @@
+{
+  "metrics_note": "composite_error = 0.40*(1-SSIM)+0.25*LPIPS-lite+0.35*(1-sil IoU); no color histogram",
+  "before": {
+    "label": "baseline demo_pikachu (up_axis=1, yaw=120, no orient protect)",
+    "shape": [
+      13,
+      19,
+      8
+    ],
+    "beads": 682,
+    "mean_ssim": 0.33314357749741147,
+    "mean_lpips_lite": 0.3402453064918518,
+    "mean_silhouette_iou": 0.2919152258663247,
+    "composite_error": 0.5996335665707847
+  },
+  "after": {
+    "label": "demo_pikachu_oriented (auto standing-axis + photo yaw + verify gate)",
+    "shape": [
+      18,
+      19,
+      16
+    ],
+    "beads": 1893,
+    "up_axis": 0,
+    "yaw_deg": 45.0,
+    "verify_gate_passed": true,
+    "mean_ssim": 0.2859391280326736,
+    "mean_lpips_lite": 0.2478574961423874,
+    "mean_silhouette_iou": 0.6526764914000418,
+    "composite_error": 0.4691519508325128
+  },
+  "delta_composite_error": 0.13048161573827188,
+  "delta_silhouette_iou": 0.3607612655337171
+}
