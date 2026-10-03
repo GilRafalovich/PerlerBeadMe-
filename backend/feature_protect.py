@@ -26,6 +26,9 @@ from color_quantizer import PERLER_PALETTE
 
 RED = tuple(int(x) for x in PERLER_PALETTE["Red"])
 BLACK = tuple(int(x) for x in PERLER_PALETTE["Black"])
+YELLOW = tuple(int(x) for x in PERLER_PALETTE["Yellow"])
+GREEN = tuple(int(x) for x in PERLER_PALETTE["Green"])
+BROWN = tuple(int(x) for x in PERLER_PALETTE["Brown"])
 
 
 @dataclass
@@ -707,6 +710,52 @@ def geometric_eye_hits(
     return _dilate_hits({z: hit}, voxel, min_n, max_steps=2)
 
 
+def _expand_hits_around_centroid(
+    layer_hits: Dict[int, np.ndarray],
+    voxel: np.ndarray,
+    min_count: int,
+    z_radius: int = 2,
+) -> Dict[int, np.ndarray]:
+    """Expand thin photo-mapped hits to ≥min_count around the feature centroid.
+
+    Stays within occupied voxels near the photo-mapped cluster (same / adjacent
+    layers). Used for Epic 3 readable eyes — still photo-derived, not geometric.
+    """
+    if min_count <= 0 or _count_hits(layer_hits) >= min_count:
+        return layer_hits
+    coords = []
+    for z, hit in layer_hits.items():
+        xs, ds = np.where(hit)
+        for x, d in zip(xs, ds):
+            coords.append((int(z), int(x), int(d)))
+    if not coords:
+        return layer_hits
+    arr = np.array(coords, dtype=np.float64)
+    cz, cx, cd = arr.mean(axis=0)
+    fx, fz, h = voxel.shape
+    z0 = max(0, int(round(cz)) - z_radius)
+    z1 = min(h, int(round(cz)) + z_radius + 1)
+    sample = next(iter(layer_hits.values()))
+    candidates = []
+    for z in range(z0, z1):
+        occ = voxel[:, :, z] > 0
+        xs, ds = np.where(occ)
+        for x, d in zip(xs, ds):
+            dist = (float(z) - cz) ** 2 + (float(x) - cx) ** 2 + (float(d) - cd) ** 2
+            candidates.append((dist, int(z), int(x), int(d)))
+    if not candidates:
+        return layer_hits
+    candidates.sort()
+    out: Dict[int, np.ndarray] = {z: h.copy() for z, h in layer_hits.items()}
+    for _, z, x, d in candidates:
+        if _count_hits(out) >= min_count:
+            break
+        if z not in out:
+            out[z] = np.zeros_like(sample, dtype=bool)
+        out[z][x, d] = True
+    return out
+
+
 def _cap_hits_to_cluster(
     layer_hits: Dict[int, np.ndarray],
     target: int,
@@ -765,9 +814,16 @@ def _dilate_hits(
     return hits
 
 
-def _paint(colors: np.ndarray, layer_hits: Dict[int, np.ndarray], rgb: Tuple[int, int, int]):
+def _paint(
+    colors: np.ndarray,
+    layer_hits: Dict[int, np.ndarray],
+    rgb: Tuple[int, int, int],
+    protected: Optional[np.ndarray] = None,
+):
     for z, hit in layer_hits.items():
         colors[:, :, z][hit] = np.array(rgb, dtype=np.uint8)
+        if protected is not None:
+            protected[:, :, z][hit] = True
 
 
 def image_project_crop_box(subject_mask: np.ndarray) -> Tuple[int, int, int, int]:
@@ -785,6 +841,157 @@ def image_project_crop_box(subject_mask: np.ndarray) -> Tuple[int, int, int, int
     x0b = max(0, x0b - pad_x)
     x1b = min(w, x1b + pad_x)
     return y0b, y1b, x0b, x1b
+
+
+
+def _nearest_palette_name(rgb: Tuple[int, int, int]) -> str:
+    """Map an RGB triple to the nearest named Perler color."""
+    from color_quantizer import ColorQuantizer
+
+    cq = ColorQuantizer()
+    q = cq.quantize(np.array([[rgb]], dtype=np.uint8))[0, 0]
+    for name, val in PERLER_PALETTE.items():
+        if tuple(int(x) for x in val) == tuple(int(c) for c in q):
+            return name
+    diffs = np.sum(
+        (cq.palette_rgb.astype(int) - np.array(q, dtype=int)) ** 2, axis=1
+    )
+    return cq.color_names[int(np.argmin(diffs))]
+
+
+def _color_counts(colors: np.ndarray, voxel: np.ndarray) -> Dict[str, int]:
+    """Count occupied voxels by nearest Perler name (handles non-exact RGBs)."""
+    from collections import Counter
+
+    occ = voxel > 0
+    counts: Counter = Counter()
+    coords = list(zip(*np.where(occ)))
+    for x, y, z in coords:
+        rgb = tuple(int(v) for v in colors[x, y, z])
+        # Fast path: exact palette match
+        name = None
+        for n, val in PERLER_PALETTE.items():
+            if rgb == tuple(int(c) for c in val):
+                name = n
+                break
+        if name is None:
+            name = _nearest_palette_name(rgb)
+        counts[name] += 1
+    return dict(counts)
+
+
+def _name_mask(
+    colors: np.ndarray, voxel: np.ndarray, name: str
+) -> np.ndarray:
+    """Boolean mask of occupied voxels whose nearest Perler name is `name`."""
+    target = tuple(int(x) for x in PERLER_PALETTE[name])
+    occ = voxel > 0
+    # Exact match first
+    exact = (
+        occ
+        & (colors[:, :, :, 0] == target[0])
+        & (colors[:, :, :, 1] == target[1])
+        & (colors[:, :, :, 2] == target[2])
+    )
+    # Also catch near-palette photo colors via nearest name (only where not exact any palette)
+    from color_quantizer import ColorQuantizer
+
+    cq = ColorQuantizer()
+    remaining = occ & ~exact
+    if not remaining.any():
+        return exact
+    # Quantize remaining flat to palette, mark those that land on target name
+    coords = list(zip(*np.where(remaining)))
+    mask = exact.copy()
+    target_name = name
+    for x, y, z in coords:
+        rgb = tuple(int(v) for v in colors[x, y, z])
+        n = _nearest_palette_name(rgb)
+        if n == target_name:
+            mask[x, y, z] = True
+    return mask
+
+
+def cleanup_body_colors(
+    colors: np.ndarray,
+    voxel: np.ndarray,
+    protected: Optional[np.ndarray] = None,
+    *,
+    brown_island_max: int = 12,
+) -> Tuple[np.ndarray, dict]:
+    """Remap stray Green + small Brown islands on non-protected body → Yellow.
+
+    Epic 3.1: after image_project + feature protect, strip speckled green/brown
+    on the yellow body while keeping protected feature hits (eyes/cheeks/ears)
+    and larger Brown accents (e.g. intentional photo-mapped patches).
+    Classification uses nearest Perler name so photo-projected RGBs are covered.
+    """
+    from collections import deque
+
+    out = colors.copy()
+    occ = voxel > 0
+    if protected is None:
+        protected = np.zeros(voxel.shape, dtype=bool)
+    else:
+        protected = protected.astype(bool)
+
+    before = _color_counts(out, voxel)
+    editable = occ & ~protected
+
+    green_m = _name_mask(out, voxel, "Green") & editable
+    green_n = int(green_m.sum())
+    out[green_m] = np.array(YELLOW, dtype=np.uint8)
+
+    brown_m = _name_mask(out, voxel, "Brown") & editable
+    brown_remapped = 0
+    brown_kept = 0
+    if brown_m.any():
+        visited = set()
+        coords = list(zip(*np.where(brown_m)))
+        for seed in coords:
+            if seed in visited:
+                continue
+            q = deque([seed])
+            visited.add(seed)
+            comp = []
+            while q:
+                x, y, z = q.popleft()
+                comp.append((x, y, z))
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for dz in (-1, 0, 1):
+                            if dx == dy == dz == 0:
+                                continue
+                            nx, ny, nz = x + dx, y + dy, z + dz
+                            if not (
+                                0 <= nx < brown_m.shape[0]
+                                and 0 <= ny < brown_m.shape[1]
+                                and 0 <= nz < brown_m.shape[2]
+                            ):
+                                continue
+                            npos = (nx, ny, nz)
+                            if npos in visited or not brown_m[nx, ny, nz]:
+                                continue
+                            visited.add(npos)
+                            q.append(npos)
+            if len(comp) <= brown_island_max:
+                for x, y, z in comp:
+                    out[x, y, z] = np.array(YELLOW, dtype=np.uint8)
+                brown_remapped += len(comp)
+            else:
+                brown_kept += len(comp)
+
+    after = _color_counts(out, voxel)
+    report = {
+        "before": before,
+        "after": after,
+        "green_remapped": green_n,
+        "brown_remapped": brown_remapped,
+        "brown_kept_large": brown_kept,
+        "brown_island_max": brown_island_max,
+        "protected_voxels": int(protected.sum()),
+    }
+    return out, report
 
 
 def apply_feature_protect(
@@ -812,6 +1019,7 @@ def apply_feature_protect(
     box = image_project_crop_box(subject_mask)
     masks.crop_box = box
     out = colors.copy()
+    protected = np.zeros(voxel.shape, dtype=bool)
     report = {"notes": list(masks.notes), "features": {}}
 
     def _inject(
@@ -832,12 +1040,19 @@ def apply_feature_protect(
                 hits = map_mask_to_layer_hits(
                     cropped, voxel, list(range(voxel.shape[2])), snap_to_occupied=True
                 )
-            hits = _dilate_hits(hits, voxel, min_n)
+            before = _count_hits(hits)
+            hits = _dilate_hits(hits, voxel, min_n, max_steps=6)
+            # Epic 3: thin photo eyes → compact disk around photo-mapped centroid
+            if _count_hits(hits) < min_n and (
+                name.startswith("eye") or name.startswith("cheek")
+            ):
+                hits = _expand_hits_around_centroid(hits, voxel, min_n, z_radius=2)
+            grew = _count_hits(hits) > before
             # Cheeks/eyes: keep a compact cluster (≥min, ≤~2×min) not the whole blob
             if name.startswith("cheek"):
                 hits = _cap_hits_to_cluster(hits, min_n, max_beads=max(4, min_n * 2))
             elif name.startswith("eye"):
-                hits = _cap_hits_to_cluster(hits, min_n, max_beads=max(2, min_n * 2))
+                hits = _cap_hits_to_cluster(hits, min_n, max_beads=max(3, min_n * 2))
             elif name.startswith("ear"):
                 hits = _cap_hits_to_cluster(hits, min_n, max_beads=max(2, min_n * 2))
             det_m = (masks.detection_methods or {}).get(name, "")
@@ -845,6 +1060,13 @@ def apply_feature_protect(
                 method = det_m
             else:
                 method = "photo_map"
+            # Label photo-derived expansion (not geometric) when we grew thin hits
+            if grew and name.startswith("eye") and method.startswith("photo"):
+                method = "photo_edge_dilate"
+                report["notes"].append(f"{name}_photo_edge_dilate")
+            elif grew and name.startswith("cheek") and method.startswith("photo"):
+                if "dilate" not in method:
+                    method = f"{method}_dilate" if method != "photo_map" else "photo_map_dilate"
         if _count_hits(hits) < min_n and geometric == "ear_left":
             hits = geometric_ear_tip_hits(voxel, "left", min_n)
             method = "geometric_ear"
@@ -863,7 +1085,7 @@ def apply_feature_protect(
             report["notes"].append(f"{name}_geometric_eye")
         painted = _count_hits(hits)
         if painted > 0:
-            _paint(out, hits, rgb)
+            _paint(out, hits, rgb, protected=protected)
         report["features"][name] = {
             "detected": bool(detected),
             "painted": painted,
@@ -903,6 +1125,15 @@ def apply_feature_protect(
             "ear_tips_right",
         )
     )
+    # Epic 3.1: strip stray green / small brown islands on non-protected body
+    out, cleanup = cleanup_body_colors(out, voxel, protected)
+    report["body_color_cleanup"] = cleanup
+    if cleanup.get("green_remapped") or cleanup.get("brown_remapped"):
+        report["notes"].append(
+            "body_color_cleanup:"
+            f"green={cleanup.get('green_remapped', 0)},"
+            f"brown={cleanup.get('brown_remapped', 0)}"
+        )
     return out, report
 
 

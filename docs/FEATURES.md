@@ -141,6 +141,52 @@ Outputs per kit:
 
 ---
 
+
+### Epic 3.1 — Kid-scale with shape quality (box demo)
+
+Epic 3 (`demo_pikachu_imgproj_kid/`, 15×11×11, 600 beads) met feature mins but failed proportion (cube stump, front sil IoU 0.574, stray green/brown). **Not ship.**
+
+Epic 3.1 ship candidate: `backend/demo_pikachu_imgproj_kid_v2/`
+
+| | Epic 2 eyes | Epic 3 kid (ref) | **Epic 3.1 v2** |
+|--|--|--|--|
+| Beads | 1596 | 600 | **775** (700–800 band) |
+| Shape | 19×14×22 | 15×11×11 cube | **14×10×17** (aspect h/maxXZ **1.21**) |
+| Front sil IoU | 0.695 | 0.574 | **0.757** |
+| `composite_error` | 0.466 | 0.528 | **0.432** |
+| Eyes/cheeks | 2→6 | 6/6 | **6/6** `photo_edge` / `photo_map` |
+| Colors | — | Green 7 · Brown 9 | **Yellow 701 · Orange 45 · Red 16 · Black 13** (green/brown cleaned) |
+| Difficulty | — | Medium ~45 min | **Medium ~60 min** |
+
+Body cleanup (`feature_protect.cleanup_body_colors`): remap Green + small Brown islands on non-protected voxels → Yellow after feature protect. Before→after on v2: Green 9→0, Brown 19→0, Yellow 673→701.
+
+CLI: `--footprint 13 --layers 17 --feature-protect --feature-min-eye 3 --feature-min-cheek 3`.
+
+
+
+
+### Epic 4 — Character kit (template-first)
+
+**New product path** (not photo `image_project` identity): procedural Pikachu mesh + part-aware paint.
+
+- **Identity source:** `template_first` (`backend/character_kit.py`)
+- **Hard palette only:** Yellow / Red / Black / Brown (Green=Grey=0)
+- **Parts:** `parts/{body,head,ear_*,eye_*,cheek_*,tail}.png` + `part_labels.npy`
+- **Ship gates:** beads ≤800, recognizability, feature mins — **not** photo SSIM/`composite_error` (logged as diagnostics only)
+- **Demo:** `backend/demo_pikachu_character_kit/` — **767** beads, `13×9×20`, Medium ~60 min, `feature_gate` 1.0
+
+```bash
+cd backend
+../.venv/bin/python kid_pipeline.py \
+  --image demo_pikachu/01_input.jpg \
+  --character-kit pikachu \
+  --out demo_pikachu_character_kit \
+  --feature-min-eye 3 --feature-min-cheek 3
+# or: ../.venv/bin/python character_kit.py --character-kit pikachu --image ... --out ...
+```
+
+Spec: `backend/docs/epic4_character_kit.md`
+
 ## Quick feature matrix
 
 | Feature | Status |
@@ -153,5 +199,6 @@ Outputs per kit:
 | Color histogram in score | ❌ by design |
 | Instruction sheets + PDF | ✅ |
 | Lego stud/socket interlock | ✅ (post-hoc / demo) |
-| Feature preservation (face/eyes/ears/tail) | ✅ box demo + `feature_gate` (uncommitted) |
+| Feature preservation (face/eyes/ears/tail) | ✅ box demo + `feature_gate` |
+| Character kit (template-first Pikachu) | ✅ Epic 4 demo `demo_pikachu_character_kit` |
 | Frontend `kid_mode` query by default | ⚠️ API supports; UI may omit query |

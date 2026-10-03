@@ -271,11 +271,18 @@ def nearest_palette_name(rgb: tuple[int, int, int], quantizer: ColorQuantizer) -
 # ---------------------------------------------------------------------------
 
 def estimate_difficulty(total_beads: int, layers: int, colors_used: int) -> dict:
-    # Rough kid heuristics (solid Pokémon-scale figures often land ~500–900)
-    if total_beads <= 450 and layers <= 8 and colors_used <= 5:
-        level, minutes = "Easy", 30
-    elif total_beads <= 900 and layers <= 10 and colors_used <= 8:
-        level, minutes = "Medium", 45 if total_beads < 700 else 60
+    """Kid-mode heuristics: ≤800 beads report Easy/Medium (~45–60 min).
+
+    Epic 3: kits at kid scale must not show Hard solely because layer count
+    exceeds the old ≤10 Medium cap — bead budget is the primary signal.
+    """
+    if total_beads <= 400 and layers <= 10 and colors_used <= 6:
+        level, minutes = "Easy", 45
+    elif total_beads <= 800 and layers <= 20 and colors_used <= 8:
+        # Medium band: stretch ≤600 → ~45 min; up to 800 → ~60 min
+        level, minutes = "Medium", 45 if total_beads <= 600 else 60
+    elif total_beads <= 1200 and layers <= 20:
+        level, minutes = "Hard (ask a grown-up)", 75
     else:
         level, minutes = "Hard (ask a grown-up)", 90
     return {

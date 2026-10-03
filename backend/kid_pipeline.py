@@ -357,11 +357,35 @@ def main():
         help="With --restyle, do not composite head onto standing template",
     )
     ap.add_argument(
+        "--character-kit",
+        default=None,
+        metavar="NAME",
+        help="Epic 4: template-first character kit (e.g. pikachu). "
+             "Skips photo image_project identity; photo is optional diagnostics only.",
+    )
+    ap.add_argument(
         "--triposr",
         action="store_true",
         help="Regenerate mesh via TripoSR HTTP from (restyled) image; falls back to procedural on failure",
     )
     args = ap.parse_args()
+
+    # Epic 4: character-kit path (template-first) — dedicated runner
+    if getattr(args, "character_kit", None):
+        from character_kit import run_character_kit
+
+        run_character_kit(
+            out_dir=args.out,
+            character=str(args.character_kit),
+            image_path=args.image,
+            footprint=args.footprint if args.footprint != 18 else None,
+            layers=args.layers if args.layers != 10 else None,
+            min_eye=int(args.feature_min_eye),
+            min_cheek=int(args.feature_min_cheek),
+            min_ear_tip=int(args.feature_min_ear_tip),
+            title=args.title if args.title != "Kid Perler Dog" else "Kid Pikachu Character Kit",
+        )
+        return
 
     os.makedirs(args.out, exist_ok=True)
     mesh_path = args.mesh
